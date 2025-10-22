@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Marathon Results Table</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #fcfcfc; }
+    .controls-box {
+      width: 95%; margin: 30px auto 10px auto; display: flex; gap: 24px; flex-wrap: wrap; align-items: center;
+    }
+    .search-box {
+      width: 95%; margin: 0 auto 10px auto; display: flex; gap: 24px; flex-wrap: wrap;
+    }
+    .search-box input[type="text"], .controls-box select {
+      padding: 8px; font-size: 1em; border: 1px solid #bbb; border-radius: 4px; width: 240px; margin-bottom: 8px;
+    }
+    .search-label, .controls-label { font-weight: bold; margin-right: 10px; }
+    table { border-collapse: collapse; width: 95%; margin: 20px auto; font-size: 0.95em; }
+    th, td { border: 1px solid #bbb; padding: 6px 10px; text-align: left; }
+    caption { font-weight: bold; margin: 22px 0 12px; font-size: 1.2em; }
+    .show-all-btn {
+      display: block;
+      margin: 16px auto;
+      padding: 12px 32px;
+      font-size: 1em;
+      font-weight: bold;
+      border: 2px solid #bbb;
+      border-radius: 6px;
+      background: #f4f4f4;
+      cursor: pointer;
+      text-align: center;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    }
+    .hidden { display: none !important; }
+
+    th.col-center, td.col-center {
+      width: 10vw;
+      min-width: 80px;
+      max-width: 160px;
+      text-align: center;
+    }
+
+    th.sortable { cursor: pointer; }
+    th.sorted-asc::after { content: " ▲"; position: absolute; right: 6px; }
+    th.sorted-desc::after { content: " ▼"; position: absolute; right: 6px; }
+
+    /* Highlight sorted column cells */
+    td.sorted-cell, th.sorted-cell {
+      background: #e3f2fd !important;
+      transition: background 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls-box">
+    <span class="controls-label">Show by gender:</span>
+    <select id="genderSelect">
+      <option value="both" selected>Both</option>
+      <option value="male">Male</option>
+      <option value="female">Female</option>
+    </select>
+  </div>
+  <div class="search-box">
+    <span class="search-label">Search by Name:</span>
+    <input type="text" id="nameSearch" placeholder="Runner name...">
+    <span class="search-label">Search by Bib:</span>
+    <input type="text" id="bibSearch" placeholder="Bib number...">
+  </div>
+  <div id="tables"></div>
+  <script>
+    const dataUrl = "marathon-data.json";
+
+    const columns = [
+      "Bib", "Official Rank", "Chip Rank", "Name", "Year", "Country", "Team", "Gun Time", "Chip Time"
+    ];
+    const sortableIndices = [1, 2, 7, 8];
+
+    function isEmpty(val) { return val === null || val === undefined || val === ""; }
+    function getNumber(val) {
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        let n = parseFloat(val.replace(/[^\d\.]/g, ''));
+        return isNaN(n) ? null : n;
+      }
+      return null;
+    }
+    function getRankNumber(val) {
+      if (typeof val !== "string") return null;
+      let m = val.match(/^(\d+)/);
+      if (m) return parseInt(m[1], 10);
+      return null;
+    }
+    function chipTimeSeconds(val) {
+      if (typeof val === "string" && val.match(/^\d{2}:\d{2}:\d{2}$/)) {
+        return val.split(':').reduce((acc, x) => acc * 60 + +x, 0);
+      }
+      return Number.MAX_SAFE_INTEGER;
+    }
+    function assignChipRanks(rows) {
+      let indexed = rows.map((row, idx) => ({ row, idx }));
+      indexed.sort((a, b) => chipTimeSeconds(a.row[8]) - chipTimeSeconds(b.row[8]));
+      let chipRanks = Array(rows.length).fill("");
+      let rank = 1;
+      for (let i = 0; i < indexed.length; ++i) {
+        const origIdx = indexed[i].idx;
+        const rankVal = indexed[i].row[2];
+        if (getRankNumber(rankVal) !== null) {
+          chipRanks[origIdx] = rank;
+          rank++;
+        }
+      }
+      return chipRanks;
+    }
+    function filterRows(rows, chipRanks, {name, bib}) {
+      return rows.map((row, i) => ({
+        row,
+        chipRank: chipRanks[i]
+      })).filter(({row}) => {
+        if (!Array.isArray(row) || row.length < 9) return false;
+        if (name && row[3].toLowerCase().indexOf(name) === -1) return false;
+        if (bib && row[0].toString().indexOf(bib) === -1) return false;
+        return true;
+      });
+    }
+
+    // Table rendering with sorted column highlighting and "Show all" button logic
+    function createSortableTable(rowsWithChipRank, captionText, tableId, totalCount, showLimit) {
+      let displayRows = rowsWithChipRank.map(({row, chipRank}) => [
+        row[0], // Bib
+        row[2], // Official Rank
+        chipRank !== "" ? chipRank : "", // Chip Rank
+        row[3], // Name
+        row[4], // Year
+        row[5], // Country
+        row[6], // Team
+        row[7], // Gun Time
+        row[8]  // Chip Time
+      ]);
+
+      let currentSort = { idx: 7, asc: true };
+      let showAllRows = false;
+
+      const table = document.createElement('table');
+      table.id = tableId;
+      const caption = document.createElement('caption');
+      caption.textContent = captionText;
+      table.appendChild(caption);
+
+      const thead = document.createElement('thead');
+      const tr = document.createElement('tr');
+      columns.forEach((col, idx) => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        if (sortableIndices.includes(idx)) th.classList.add('sortable');
+        if (idx <= 2) th.classList.add('col-center');
+		if (currentSort.idx === idx && sortableIndices.includes(idx)) th.classList.add('sorted-cell');
+        tr.appendChild(th);
+      });
+      thead.appendChild(tr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      function renderBody() {
+        tbody.innerHTML = '';
+        const rowsToShow = showAllRows ? displayRows : displayRows.slice(0, showLimit);
+        rowsToShow.forEach(row => {
+          const tr = document.createElement('tr');
+          row.forEach((cell, idx) => {
+            const td = document.createElement('td');
+            td.textContent = cell;
+            if (idx <= 2) td.classList.add('col-center');
+            if (currentSort.idx === idx && sortableIndices.includes(idx)) td.classList.add('sorted-cell');
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      }
+      renderBody();
+      table.appendChild(tbody);
+
+      // Sorting logic, highlights sorted column
+      thead.querySelectorAll('th').forEach((th, idx) => {
+        if (!sortableIndices.includes(idx)) return;
+        th.addEventListener('click', () => {
+          const isAsc = th.classList.contains('sorted-asc');
+          Array.from(thead.querySelectorAll('th')).forEach(thh => thh.classList.remove('sorted-asc', 'sorted-desc', 'sorted-cell'));
+          th.classList.add(isAsc ? 'sorted-desc' : 'sorted-asc', 'sorted-cell');
+          currentSort.idx = idx;
+          currentSort.asc = !isAsc;
+
+          displayRows.sort((a, b) => {
+            const aRankIsNumeric = getRankNumber(a[1]) !== null;
+            const bRankIsNumeric = getRankNumber(b[1]) !== null;
+            if (aRankIsNumeric && !bRankIsNumeric) return -1;
+            if (!aRankIsNumeric && bRankIsNumeric) return 1;
+
+            let v1 = a[idx];
+            let v2 = b[idx];
+            const empty1 = isEmpty(v1);
+            const empty2 = isEmpty(v2);
+            if (empty1 && !empty2) return 1;
+            if (!empty1 && empty2) return -1;
+            if (empty1 && empty2) {
+              let bib1 = getNumber(a[0]);
+              let bib2 = getNumber(b[0]);
+              return bib1 - bib2;
+            }
+            if (columns[idx] === "Official Rank") {
+              let r1 = getRankNumber(v1);
+              let r2 = getRankNumber(v2);
+              if (r1 !== null && r2 !== null) {
+                if (r1 !== r2) return currentSort.asc ? r1 - r2 : r2 - r1;
+                let bib1 = getNumber(a[0]);
+                let bib2 = getNumber(b[0]);
+                return bib1 - bib2;
+              }
+              if (v1 !== v2) return currentSort.asc ? v1.localeCompare(v2) : v2.localeCompare(v1);
+              let bib1 = getNumber(a[0]);
+              let bib2 = getNumber(b[0]);
+              return bib1 - bib2;
+            }
+            if (columns[idx] === "Chip Rank") {
+              let n1 = getNumber(v1);
+              let n2 = getNumber(v2);
+              if (n1 !== null && n2 !== null) {
+                if (n1 !== n2) return currentSort.asc ? n1 - n2 : n2 - n1;
+                let bib1 = getNumber(a[0]);
+                let bib2 = getNumber(b[0]);
+                return bib1 - bib2;
+              }
+              let bib1 = getNumber(a[0]);
+              let bib2 = getNumber(b[0]);
+              return bib1 - bib2;
+            }
+            if (columns[idx] === "Gun Time" || columns[idx] === "Chip Time") {
+              if (v1 && v2 && v1.match(/^\d{2}:\d{2}:\d{2}$/) && v2.match(/^\d{2}:\d{2}:\d{2}$/)) {
+                const t1 = chipTimeSeconds(v1);
+                const t2 = chipTimeSeconds(v2);
+                if (t1 !== t2) return currentSort.asc ? t1 - t2 : t2 - t1;
+                let bib1 = getNumber(a[0]);
+                let bib2 = getNumber(b[0]);
+                return bib1 - bib2;
+              }
+            }
+            if (v1 !== v2) return currentSort.asc ? v1.localeCompare(v2) : v2.localeCompare(v1);
+            let bib1 = getNumber(a[0]);
+            let bib2 = getNumber(b[0]);
+            return bib1 - bib2;
+          });
+          renderBody();
+        });
+      });
+
+      let btn = null;
+      if (displayRows.length > showLimit) {
+        btn = document.createElement('button');
+        btn.className = "show-all-btn";
+        btn.textContent = `Show all ${totalCount} athletes`;
+        btn.onclick = function() {
+          showAllRows = true;
+          renderBody();
+          btn.classList.add("hidden");
+        };
+      }
+      return { table, btn };
+    }
+
+    let marathonData = null, femaleChipRanks = null, maleChipRanks = null;
+    let currentGender = "both";
+
+    function renderTables(data, filters = {}, gender = "both") {
+      const marathon = data["#1_Marathon"];
+      const femaleRowsWithChipRank = filterRows(marathon["#1_Female"], femaleChipRanks, filters);
+      const maleRowsWithChipRank = filterRows(marathon["#2_Male"], maleChipRanks, filters);
+      const container = document.getElementById('tables');
+      container.innerHTML = '';
+      if (gender === "female") {
+        const {table: tbl, btn} = createSortableTable(femaleRowsWithChipRank, "Marathon - Female", "femaleTable", marathon["#1_Female"].length, 15);
+        container.appendChild(tbl);
+        if (btn) container.appendChild(btn);
+      } else if (gender === "male") {
+        const {table: tbl, btn} = createSortableTable(maleRowsWithChipRank, "Marathon - Male", "maleTable", marathon["#2_Male"].length, 15);
+        container.appendChild(tbl);
+        if (btn) container.appendChild(btn);
+      } else {
+        const {table: tblF, btn: btnF} = createSortableTable(femaleRowsWithChipRank, "Marathon - Female", "femaleTable", marathon["#1_Female"].length, 15);
+        const {table: tblM, btn: btnM} = createSortableTable(maleRowsWithChipRank, "Marathon - Male", "maleTable", marathon["#2_Male"].length, 15);
+        container.appendChild(tblF);
+        if (btnF) container.appendChild(btnF);
+        container.appendChild(tblM);
+        if (btnM) container.appendChild(btnM);
+      }
+    }
+
+    function getFilters() {
+      return {
+        name: document.getElementById('nameSearch').value.trim().toLowerCase(),
+        bib: document.getElementById('bibSearch').value.trim()
+      };
+    }
+
+    fetch(dataUrl)
+      .then(resp => resp.json())
+      .then(json => {
+        marathonData = json;
+        femaleChipRanks = assignChipRanks(marathonData["#1_Marathon"]["#1_Female"]);
+        maleChipRanks = assignChipRanks(marathonData["#1_Marathon"]["#2_Male"]);
+        renderTables(marathonData, {}, currentGender);
+
+        document.getElementById('nameSearch').addEventListener('input', () => {
+          renderTables(marathonData, getFilters(), currentGender);
+        });
+        document.getElementById('bibSearch').addEventListener('input', () => {
+          renderTables(marathonData, getFilters(), currentGender);
+        });
+        document.getElementById('genderSelect').addEventListener('change', (e) => {
+          currentGender = e.target.value;
+          renderTables(marathonData, getFilters(), currentGender);
+        });
+      })
+      .catch(err => {
+        document.getElementById('tables').innerHTML = "<div style='color:red;text-align:center;font-weight:bold;'>Could not load marathon data.<br/>" + err.message + "</div>";
+      });
+  </script>
+</body>
+</html>
